@@ -1,0 +1,314 @@
+\documentclass[11pt]{article}
+\usepackage{fullpage}
+\usepackage{amsmath}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{setspace}
+\usepackage{graphicx}
+\usepackage{float}
+\renewcommand{\bottomfraction}{0.8}
+\usepackage{caption}
+\usepackage{adjustbox}
+
+\setstretch{1}
+\setlength{\parindent}{0pt}
+
+\usepackage{listings}
+\usepackage{xcolor}
+
+\lstset{
+    basicstyle=\ttfamily\small,
+    frame=single,
+    breaklines=true,
+    columns=fullflexible,
+    xleftmargin=0.3cm,
+    framexleftmargin=0.3cm,
+    framextopmargin=0.2cm,
+    framexbottommargin=0.2cm,
+}
+
+\title{Secure Communication Protocol Design Report}
+\author{\footnotesize Poornima PUNDIR, Mosè ACARO}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Introduction}
+
+The goal of this protocol is to allow two communicating parties—Alice and Bob—to
+establish a mutually authenticated shared secret using asymmetric cryptography
+and then use this secret to operate a secure, encrypted, integrity-protected
+communication channel.
+
+This report specifies:
+\begin{enumerate}[label=\arabic*.]
+    \item An Authenticated Key Exchange (AKE) protocol using manually
+    implemented RSA signatures and Diffie–Hellman (DH) key exchange.
+    \item A symmetric encrypted channel using AES-256-GCM, including integrity,
+    authenticity, and replay protection.
+\end{enumerate}
+
+Security is prioritized over availability: any verification failure results in
+immediate termination.
+
+\section{Authenticated Key Exchange Protocol}
+
+\subsection{Chosen Cryptographic Primitives}
+
+\begin{itemize}
+\item \textbf{RSA Signatures:}  
+Used to authenticate Diffie–Hellman values and prove identity. This prevents
+MITM attacks by binding DH values to identities. RSA is required for the
+assignment and mirrors authentication patterns in TLS, SSH, and Noise-based
+protocols.
+
+\item \textbf{SHA-256:}  
+Hashes handshake components prior to signing. Ensures fixed-size inputs for
+RSA, provides collision resistance, and prevents algebraic manipulation.
+
+\item \textbf{Diffie–Hellman Key Exchange:}  
+Used to compute the shared secret $K = g^{ab} \bmod p$. Provides forward secrecy
+when ephemeral exponents are used and is robust against passive eavesdropping.
+
+\item \textbf{CA-Signed Certificates (Local CA Trust Anchor):}  
+Each party generates a long-term RSA keypair and obtains a certificate signed
+by a local CA. The CA certificate is distributed out-of-band and used as the
+trust anchor during the handshake.
+
+\item \textbf{Random Nonces ($randA$, $randB$):}  
+Provide freshness and prevent replay of handshake messages.
+\end{itemize}
+
+\subsection{Cryptographic Setup}
+
+Each party generates:
+\begin{itemize}
+    \item An RSA keypair and a CA-signed certificate.
+    \item A DH private exponent ($a$ or $b$) and corresponding public value
+    ($A = g^a$, $B = g^b$).
+    \item A fresh random nonce ($randA$, $randB$).
+\end{itemize}
+
+Certificates received during the handshake must validate against the trusted
+CA certificate.
+
+\subsection{Protocol Message Sequence}
+
+\begin{figure}[H]
+    \centering
+    \begin{adjustbox}{max totalheight=0.5\textheight, center}
+        \includegraphics{protocol_sequence.png}
+    \end{adjustbox}
+    \captionsetup{font=small}
+    \caption{Authenticated Key Exchange Protocol Sequence}
+    \label{fig:protocol-sequence}
+\end{figure}
+
+
+\subsubsection*{Step 1 — Alice → Bob}
+
+\begin{lstlisting}
+certA
+A = g^a mod p
+randA
+sigA = Sign_privA( SHA256(A || randA) )
+\end{lstlisting}
+
+Bob verifies certA and checks sigA using Alice’s public key.  
+If verification fails, the handshake is aborted.
+
+\subsubsection*{Step 2 — Bob → Alice}
+
+\begin{lstlisting}
+certB
+B = g^b mod p
+randB
+sigB = Sign_privB( SHA256(B || randB) )
+\end{lstlisting}
+
+Alice verifies certB and checks sigB under Bob’s public key.  
+If verification fails, the handshake is aborted.
+
+\subsubsection*{Step 3 — Diffie–Hellman Shared Secret}
+
+Both compute:
+\[
+K = g^{ab} \bmod p
+\]
+
+Both parties then locally derive the session key from $K$, $randA$, and $randB$.
+
+\subsection{Session Key Derivation}
+
+The symmetric session key is derived as:
+\[
+session\_key = \text{SHA256}(K \;||\; randA \;||\; randB)
+\]
+
+\subsection{Known Attacks Prevented by the Asymmetric Protocol}
+
+\begin{itemize}
+    \item \textbf{MITM attacks:}
+    An attacker cannot modify or replace the Diffie--Hellman values because each DH
+    contribution is individually authenticated with an RSA signature. Alice signs
+    $(A \,\|\, randA)$, and Bob signs $(B \,\|\, randB)$, so any attempt to alter
+    these values causes signature verification to fail. As a result, a
+    man--in--the--middle attacker cannot intercept or modify the key exchange
+    without being detected.
+
+    \item \textbf{Impersonation attacks:}
+    Only the legitimate party possesses the corresponding RSA private key needed
+    to generate valid signatures. Since the CA certificate is distributed
+    out-of-band, attackers cannot substitute their own public keys.
+
+    \item \textbf{Replay attacks:}
+    Fresh random nonces (\texttt{randA}, \texttt{randB}) are included in all
+    signatures. Replays are mitigated by tracking recently seen nonces within
+    a short time window; replays outside this window may still succeed.
+
+    \item \textbf{Passive eavesdropping:}
+    Diffie--Hellman provides secrecy even if the attacker records every message.
+    Without knowing either party’s DH private exponent, the shared secret
+    $K = g^{ab} \bmod p$ cannot be computed.
+\end{itemize}
+
+
+\section{Symmetric Secure Channel Design}
+
+\subsection{Encryption Scheme}
+
+AES-256-GCM provides confidentiality, integrity, authenticity, and replay
+protection.
+
+\subsection{Message Format}
+
+\begin{lstlisting}
+SeqNum || IV || Ciphertext || AuthTag
+\end{lstlisting}
+
+Sequence number is included as AES-GCM AAD.
+
+\subsection{Known Attacks Prevented by This Channel Design}
+
+\begin{itemize}
+    \item \textbf{Replay Attacks.}
+    Each encrypted message includes a monotonically increasing sequence number
+    transmitted as authenticated associated data (AAD) under AES-GCM. Because
+    the sequence number is integrity-protected and must be strictly increasing,
+    the receiver rejects any repeated messages or attempts to reorder previously
+    valid ciphertexts.
+
+    \item \textbf{Message Modification and Forgery.}
+    AES-GCM provides an integrated authentication tag that covers both the
+    ciphertext and the sequence number. Any bit-level modification to the
+    ciphertext, IV, or AAD results in an authentication failure during GCM tag
+    verification. An adversary lacking the session key cannot generate a valid
+    authentication tag, rendering message forgery computationally infeasible.
+
+    \item \textbf{Reordering Attacks.}
+    Since the receiver enforces strict monotonicity of sequence numbers,
+    ciphertexts delivered out of order are automatically rejected.
+
+    \item \textbf{Forced Connection Termination.}
+    Because session termination requires an authenticated \texttt{CLOSE\_NOTIFY}
+    and a corresponding authenticated \texttt{CLOSE\_ACK}, an attacker cannot
+    simulate a clean shutdown. Any attempted interruption appears only as a
+    network failure rather than a legitimate protocol-driven close.
+
+    \item \textbf{Message Injection.}
+    Without knowledge of the session key, an attacker cannot construct a valid
+    ciphertext-tag pair. Since tags are cryptographically inseparable from the
+    encrypted payload, no adversary can inject new messages into the channel that
+    would successfully authenticate at the receiving endpoint.
+\end{itemize}
+
+
+\subsection{Secure Session Termination}
+
+Control messages exchanged:
+\begin{itemize}
+    \item \texttt{CLOSE\_NOTIFY}
+    \item \texttt{CLOSE\_ACK}
+\end{itemize}
+
+Both parties delete all session keys and state.
+
+\section{Limitations}
+
+\begin{itemize}
+\item \textbf{No DoS protection.} The protocol cannot mitigate flooding or repeated
+connection attempts.
+
+\item \textbf{CA trust is out-of-band.} If the CA certificate distribution or
+private key is compromised, all authentication fails.
+
+\item \textbf{Endpoint compromise.} If an endpoint is compromised, the attacker gains full control and can impersonate indefinitely.
+
+\item \textbf{No identity hiding.} Certificates are transmitted in plaintext.
+
+\item \textbf{Forward secrecy depends on fresh DH.} Security requires fresh DH exponents for every session. Reusing DH keys breaks FS and allows past sessions to be decrypted after RSA key compromise.
+
+\item \textbf{No traffic analysis protection.} Encrypted messages still leak size and timing, allowing an attacker to infer communication patterns.
+
+\item \textbf{Raw RSA signatures without padding.} The implementation signs the
+SHA-256 hash directly with RSA (textbook RSA), which is weaker than
+standardized padding schemes such as RSASSA-PSS.
+
+\item \textbf{No specific identity binding.} Only the role is checked; sessions
+can be associated with the wrong party in multi-party settings.
+\end{itemize}
+
+
+\section{Working Application Example}
+The protocol implementation was verified using the Python \texttt{unittest} framework. A total of 20 automated tests were executed to validate each individual modules and the integrated application logic.
+
+
+\noindent
+\begin{minipage}[t]{0.48\textwidth}
+    \subsection*{Server Output}
+    \begin{lstlisting}[basicstyle=\ttfamily\tiny, breaklines=true]
+[INFO] Using cert certs/server.crt...
+[INFO] Server listening on 127.0.0.1:65432
+[INFO] Connection established...
+[INFO] Peer certificate verified...
+[INFO] Derived session key using DH.
+[DEBUG] Received (encrypted): b'\x00\x00...'
+Received: ciao
+[DEBUG] Sent: b'\x00\x00...'
+[DEBUG] Received (encrypted): b'\x00\x00...'
+Received: hello world!
+[DEBUG] Sent: b'\x00\x00...'
+[DEBUG] Received (encrypted): b'\x00\x00...'
+[INFO] Client requested secure close.
+    \end{lstlisting}
+\end{minipage}%
+\hfill
+\begin{minipage}[t]{0.48\textwidth}
+    \subsection*{Client Output}
+    \begin{lstlisting}[basicstyle=\ttfamily\tiny, breaklines=true]
+[INFO] Using cert certs/client.crt...
+[INFO] Connected to server at 127.0.0.1...
+[INFO] Peer certificate verified...
+[INFO] Derived session key using DH.
+Enter message: ciao
+[DEBUG] Sent: b'\x00\x00...'
+[DEBUG] Server response: b'\x00\x00...'
+Server response: ACK
+Enter message: hello world!
+[DEBUG] Sent: b'\x00\x00...'
+[DEBUG] Server response: b'\x00\x00...'
+Server response: ACK
+Enter message: quit
+[INFO] Sending close notification...
+[DEBUG] Waiting for Server ACK...
+[INFO] Received CLOSE_ACK.
+    \end{lstlisting}
+\end{minipage}
+
+\section{Conclusion}
+
+This protocol implements a secure authenticated key exchange using RSA and
+Diffie–Hellman. AES-256-GCM provides a confidential and integrity-protected communication channel. 
+
+\end{document}
